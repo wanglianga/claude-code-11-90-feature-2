@@ -39,12 +39,14 @@ import {
 import { secretCacheKey } from '../db/schema';
 import { remoteDb } from '../db/remoteDb';
 import {
+  apiApplyDispatch,
   apiCommitCase,
   apiGetCase,
   apiIssueGrant,
   apiListAudit,
   apiListCases,
   apiListGrants,
+  apiMarkNotificationsSent,
   apiRemoteScript,
   apiRevokeGrant,
   apiSupervisorDecision,
@@ -54,7 +56,9 @@ import {
   resetRemote,
   setServerNetworkOnline,
   type AuditDesc,
+  type DispatchApplyResult,
 } from '../mock/server';
+import type { PlanResult, SchedulerVisit } from '../lib/dispatch';
 import { emit, onMessage, type BusMessage } from '../mock/bus';
 import { onSecretsExpired, requestPurgeNow, runMerge } from '../workers/client';
 import {
@@ -188,6 +192,14 @@ interface AppContextValue {
   }) => Promise<{ ok: boolean; message?: string }>;
 
   remoteScript: (args: Parameters<typeof apiRemoteScript>[0]) => Promise<void>;
+
+  /** 主管应用跨个案排程方案；失败时返回可读原因，不做半截写入 */
+  applyDispatch: (
+    plan: PlanResult,
+    visits: SchedulerVisit[],
+    summary: string,
+  ) => Promise<DispatchApplyResult>;
+  markNotificationsSent: (caseId: string, notificationIds: string[]) => Promise<{ ok: boolean; message?: string }>;
 
   grantFor: (caseId: string) => FieldGrant | undefined;
   secretFor: (caseId: string) => SensitiveCacheEntry | undefined;
@@ -786,6 +798,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [refreshAudits, refreshCases],
   );
 
+  const applyDispatch = useCallback(
+    async (plan: PlanResult, visits: SchedulerVisit[], summary: string) => {
+      if (!actor) return { ok: false as const, code: 'FORBIDDEN' as const, message: '未登录' };
+      if (!online) return { ok: false as const, code: 'NETWORK' as const, message: '当前离线：恢复网络后再应用排程。' };
+      const res = await apiApplyDispatch({ actor, tabId, plan, visits, summary });
+      if (res.ok) {
+        await Promise.all([refreshCases(), refreshAudits()]);
+        pushToast(`排程已应用：${res.cases.length} 个个案已更新，客户通知待发出`, 'success');
+        announce('主管已应用排程方案，相关个案与家庭准备事项已同步更新');
+      } else if (res.code !== 'NETWORK') {
+        pushToast(`排程未写入：${res.message}`, 'error');
+      }
+      return res;
+    },
+    [actor, announce, online, pushToast, refreshAudits, refreshCases, tabId],
+  );
+
+  const markNotificationsSent = useCallback(
+    async (caseId: string, notificationIds: string[]) => {
+      if (!actor) return { ok: false, message: '未登录' };
+      if (!online) return { ok: false, message: '当前离线：通知发出需在线确认' };
+      const r = await apiMarkNotificationsSent({ actor, tabId, caseId, notificationIds });
+      await Promise.all([refreshCases(), refreshAudits()]);
+      if (r.ok) pushToast('已标记通知为已发出（写入审计）', 'success');
+      return r;
+    },
+    [actor, online, pushToast, refreshAudits, refreshCases, tabId],
+  );
+
   // ---------------- 授权 / 敏感缓存 ----------------
   const grantFor = useCallback(
     (caseId: string) =>
@@ -906,6 +947,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     commitAnalysis,
     supervisorDecision,
     remoteScript,
+    applyDispatch,
+    markNotificationsSent,
     grantFor,
     secretFor,
     requestGrant,

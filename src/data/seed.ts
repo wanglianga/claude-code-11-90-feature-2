@@ -1,5 +1,6 @@
 import type { Actor, AuditEntry, CaseFile } from '../types';
 import { iso } from '../lib/time';
+import { seedDispatchCases } from './dispatch';
 
 // 所有居民、机构、电话均为虚构，仅用于浏览器内演示。
 // 标准样例日：2026-11-25（周三）。
@@ -10,7 +11,8 @@ const T = {
 };
 
 export function seedCases(): CaseFile[] {
-  return [chenCase(), liangCase(), wuCase(), zhaoCase(), heCase()];
+  // 前五个是协作/合并主线样例；后五个是跨个案上门日程编排样例（均带 schedule 约束）。
+  return [chenCase(), liangCase(), wuCase(), zhaoCase(), heCase(), ...seedDispatchCases()];
 }
 
 /** 题目指定的核心样例：9:00 两标签页共同读取的版本 7 */
@@ -169,6 +171,18 @@ export function chenCase(): CaseFile {
         rev: 3,
       },
     ],
+    familyPreps: [
+      {
+        id: 'prep-chen-1',
+        appointmentId: 'appt-main',
+        kind: 'prep',
+        text: '今日 9:30 家访：请把一周药盒与助餐签收单放在桌上。',
+        dueAt: new Date(new Date(iso(2026, 11, 25, 9, 30)).getTime() - 15 * 60_000).toISOString(),
+        leadMinutes: 15,
+        done: false,
+      },
+    ],
+    notifications: [],
   };
 }
 
@@ -350,6 +364,8 @@ function baseCase(a: BaseArgs): CaseFile {
     referrals: [],
     reminders: [],
     plan: [],
+    familyPreps: [],
+    notifications: [],
   };
 }
 

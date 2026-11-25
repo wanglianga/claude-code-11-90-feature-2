@@ -6,6 +6,10 @@ import type {
   CommitResult,
   FieldGrant,
 } from '../types';
+import { DISPATCH_WORKERS, type DispatchWorker } from '../data/dispatch';
+import type { PlanResult, SchedulerVisit } from '../lib/dispatch';
+import { applyPlanToCases } from '../lib/planWrite';
+import { planFromStored } from '../lib/dispatchModel';
 import { seedAudits, seedCases } from '../data/seed';
 import { uid } from '../lib/ids';
 import { fingerprint } from '../lib/audit';
@@ -121,7 +125,7 @@ export async function apiListCases(actor: Actor): Promise<CaseFile[]> {
   const now = Date.now();
   return cases
     .map((c) => redactCase(c, actor, grants, now))
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .sort((a, b) => (a.id === 'case-chen' ? -1 : b.id === 'case-chen' ? 1 : a.id.localeCompare(b.id)));
 }
 
 export async function apiGetCase(caseId: string, actor: Actor | null): Promise<CaseFile> {
@@ -503,6 +507,284 @@ export async function apiRevokeGrant(args: {
   emit({ type: 'grants-changed', caseId: g.caseId });
   emit({ type: 'audit-added' });
   return g;
+}
+
+// ---------- 跨个案上门日程编排：应用排程方案 ----------
+
+export interface DispatchApplyArgs {
+  actor: Actor;
+  tabId: string;
+  /** 排程方案（由排程器在客户端计算；服务端只复核写入） */
+  plan: PlanResult;
+  visits: SchedulerVisit[];
+  /** 前台展示用的摘要（写入审计，便于跨标签核对） */
+  summary: string;
+}
+
+export type DispatchApplyResult =
+  | { ok: true; cases: CaseFile[]; audits: AuditEntry[]; warnings: string[] }
+  | { ok: false; code: 'FORBIDDEN' | 'NETWORK' | 'CONFLICT' | 'VALIDATION'; message: string; caseId?: string };
+
+/**
+ * 主管应用排程方案：
+ * - 只允许 supervisor；
+ * - 每个个案都必须以“主管看到的版本”为乐观锁基准，任何一案已前进则整批拒绝（不做半截写入）；
+ * - 逐案复核：固定访问时刻不得改变、不同意改派的访问不得换人、必须保留资质；
+ * - 预约被移动时，家庭准备事项必须同步移动（dueAt 与文案都要变）——未变则拒绝。
+ */
+export async function apiApplyDispatch(args: DispatchApplyArgs): Promise<DispatchApplyResult> {
+  try {
+    assertNetwork();
+  } catch {
+    return { ok: false, code: 'NETWORK', message: '当前离线：排程方案尚未写入远端，请恢复网络后重试。' };
+  }
+  await latency();
+
+  if (args.actor.role !== 'supervisor') {
+    return { ok: false, code: 'FORBIDDEN', message: '只有主管可以应用跨个案排程方案。' };
+  }
+
+  const db = await remoteDb();
+  const warnings: string[] = [];
+  const visitById = new Map(args.visits.map((v) => [v.id, v]));
+  const now = Date.now();
+
+  // 1) 只读复核：先用“当前远端案卷”重新生成写回内容，再逐案检查约束
+  const storedById = new Map<string, CaseFile>();
+  for (const c of await db.getAll('cases')) storedById.set(c.id, c);
+  const storedCases = args.visits
+    .map((v) => storedById.get(v.caseId))
+    .filter((c): c is CaseFile => Boolean(c));
+  const uniqueStored = [...new Map(storedCases.map((c) => [c.id, c])).values()];
+  // 1a) 以最新案卷重新求解同一方案，拒绝“按过期数据得出的可行结论”
+  const authoritative = planFromStored(uniqueStored, args.plan.mode);
+  const mismatch = compareAuthoritative(authoritative, args.plan);
+  if (mismatch) {
+    return { ok: false, code: 'CONFLICT', message: mismatch + ' 请刷新后重新排程。' };
+  }
+
+  const dry = applyPlanToCases(uniqueStored, args.visits, args.plan, now);
+  if (dry.rejected.length) {
+    const r = dry.rejected[0];
+    return { ok: false, code: 'VALIDATION', caseId: r.caseId, message: r.reason };
+  }
+
+  const prepared: CaseFile[] = [];
+  for (const w of dry.changedCases) {
+    const stored = storedById.get(w.id);
+    if (!stored) return { ok: false, code: 'VALIDATION', message: `案卷 ${w.id} 不存在`, caseId: w.id };
+    if (w.rev !== stored.rev) {
+      // 生成写回时的基线已落后：说明在读取与写入之间有人改过，整批拒绝，避免覆盖
+      return {
+        ok: false,
+        code: 'CONFLICT',
+        caseId: w.id,
+        message: `案卷 ${w.id} 在你排程期间被他人更新（rev ${w.rev} → ${stored.rev}）。为避免覆盖，请刷新后重新排程。`,
+      };
+    }
+    const violation = verifyDispatchWrite(stored, w, visitById, args.plan);
+    if (violation) {
+      return { ok: false, code: 'VALIDATION', caseId: w.id, message: violation };
+    }
+    if (w.rev !== stored.rev) {
+      // applyPlanToCases 会克隆基线；rev 必须以当前远端为准
+      w.rev = stored.rev;
+    }
+    w.rev = stored.rev + 1;
+    w.updatedAt = now;
+    prepared.push(w);
+  }
+
+  // 2) 事务化写入
+  const entries: AuditEntry[] = [];
+  for (const next of prepared) {
+    const audits = await buildEntries([
+      {
+        actorId: args.actor.id,
+        actorName: args.actor.name,
+        actorRole: 'supervisor',
+        tabId: args.tabId,
+        action: 'dispatch-apply',
+        target: next.id,
+        summary: args.summary,
+        caseId: next.id,
+        rev: next.rev,
+      },
+    ]);
+    entries.push(...audits);
+  }
+
+  const tx = db.transaction(['cases', 'history', 'audit'], 'readwrite');
+  for (const next of prepared) {
+    await tx.objectStore('cases').put(next);
+    await tx.objectStore('history').put({
+      hid: `${next.id}@${next.rev}`,
+      caseId: next.id,
+      rev: next.rev,
+      at: now,
+      actorName: args.actor.name,
+      snapshot: structuredClone(next),
+    } satisfies HistoryRecord);
+  }
+  for (const e of entries) await tx.objectStore('audit').put(e);
+  await tx.done;
+
+  for (const next of prepared) {
+    emit({ type: 'remote-changed', caseId: next.id, rev: next.rev, at: now, actorName: args.actor.name });
+  }
+  emit({ type: 'audit-added' });
+
+  const grants = await db.getAll('grants');
+  return {
+    ok: true,
+    cases: prepared.map((c) => redactCase(c, args.actor, grants, now)),
+    audits: entries,
+    warnings,
+  };
+}
+
+/**
+ * 复核单个案卷的排程写回是否自洽。返回 null 表示通过。
+ * 重点：固定访问、改派同意、资质、家庭准备同步。
+ */
+export function verifyDispatchWrite(
+  stored: CaseFile,
+  next: CaseFile,
+  visits: Map<string, SchedulerVisit>,
+  plan: PlanResult,
+  workers: DispatchWorker[] = DISPATCH_WORKERS,
+): string | null {
+  if (next.client.id !== stored.client.id) return '排程写回不得改动服务对象档案。';
+  const workerMap = new Map(workers.map((w) => [w.id, w]));
+  for (const appt of next.appointments) {
+    const before = stored.appointments.find((a) => a.id === appt.id);
+    if (!before) return `排程写回不得新增预约 ${appt.id}。`;
+    const sched = before.schedule;
+    if (!sched) continue;
+    const startChanged = appt.startAt !== before.startAt;
+    const workerChanged = appt.workerId !== before.workerId;
+    if (!startChanged && !workerChanged) continue;
+    if (sched.fixed && startChanged) {
+      return `固定访问 ${sched.publicLabel} 的时刻不可移动（${before.startAt} → ${appt.startAt}）。`;
+    }
+    if (appt.status !== before.status) {
+      return `排程写回不得改动预约状态（${sched.publicLabel}）。`;
+    }
+    if (workerChanged) {
+      const nextWorker = workerMap.get(appt.workerId ?? '');
+      if (!nextWorker) return `排程写回指派了未知社工 ${appt.workerId}。`;
+      if (!sched.reassignConsent && sched.preferredWorkerId && appt.workerId !== sched.preferredWorkerId) {
+        return `${sched.publicLabel}：客户不同意改派，不得换人（${sched.preferredWorkerId} → ${appt.workerId}）。`;
+      }
+      if (!sched.requiredSkills.every((s) => nextWorker.skills.includes(s))) {
+        return `${sched.publicLabel}：${nextWorker.name} 不具备所需资质 ${sched.requiredSkills.join('、')}。`;
+      }
+    }
+    if (startChanged) {
+      const prepBefore = stored.familyPreps.filter((p) => p.appointmentId === appt.id);
+      const prepAfter = next.familyPreps.filter((p) => p.appointmentId === appt.id);
+      if (prepBefore.length !== prepAfter.length) return `${sched.publicLabel}：家庭准备事项数量被改动。`;
+      const moved = prepBefore.every((pb) => {
+        const pa = prepAfter.find((p) => p.id === pb.id);
+        return !!pa && pa.dueAt !== pb.dueAt;
+      });
+      if (!moved) {
+        return `${sched.publicLabel}：预约已改时，但家庭准备事项的截止时刻没有随之更新（必须同步）。`;
+      }
+      const hasNotice = next.notifications.some(
+        (n) => n.appointmentId === appt.id && n.status === 'intended',
+      );
+      if (!hasNotice) return `${sched.publicLabel}：预约已改时，但没有生成待发出的客户通知。`;
+    }
+  }
+  // 延后访问只影响所属个案；相应预约必须仍存在，不能被静默删除
+  for (const vid of plan.deferredVisitIds) {
+    const nextHas = next.appointments.some((a) => a.id === vid);
+    const storedHas = stored.appointments.some((a) => a.id === vid);
+    if (storedHas && !nextHas) return `延后的访问 ${vid} 不应从案卷中删除。`;
+  }
+  return null;
+}
+
+// ---------- 客户通知：主管确认后标记为已发出 ----------
+
+/** 比较客户端方案与服务端权威方案；返回差异说明或 null */
+export function compareAuthoritative(server: PlanResult, client: PlanResult): string | null {
+  if (server.feasible !== client.feasible) {
+    return server.feasible
+      ? '服务端复核显示方案可行，但客户端提交的是不可行方案。'
+      : `服务端按最新数据复核后该方案已不可行：${server.violations[0] ?? '约束不再满足'}。`;
+  }
+  if (!server.feasible) return null;
+  if (server.visitCount !== client.visitCount) {
+    return `服务端复核可完成 ${server.visitCount} 项，与客户端提交的 ${client.visitCount} 项不一致。`;
+  }
+  const ser = server.schedules
+    .flatMap((s) => s.stops.map((st) => `${st.visitId}@${st.workerId}#${st.start}`))
+    .sort();
+  const cli = client.schedules
+    .flatMap((s) => s.stops.map((st) => `${st.visitId}@${st.workerId}#${st.start}`))
+    .sort();
+  if (ser.join('|') !== cli.join('|')) {
+    return '服务端按最新数据重新排程后，访问的时间或人员与提交方案不一致。';
+  }
+  return null;
+}
+
+export async function apiMarkNotificationsSent(args: {
+  actor: Actor;
+  tabId: string;
+  caseId: string;
+  notificationIds: string[];
+}): Promise<{ ok: boolean; message?: string }> {
+  assertNetwork();
+  await latency();
+  const db = await remoteDb();
+  const stored = await db.get('cases', args.caseId);
+  if (!stored) return { ok: false, message: '案卷不存在' };
+  const now = Date.now();
+  const next = structuredClone(stored);
+  let changed = 0;
+  for (const n of next.notifications) {
+    if (args.notificationIds.includes(n.id) && n.status === 'intended') {
+      n.status = 'sent';
+      n.sentAt = now;
+      changed += 1;
+    }
+  }
+  if (!changed) return { ok: true };
+  next.rev += 1;
+  next.updatedAt = now;
+
+  const entries = await buildEntries([
+    {
+      actorId: args.actor.id,
+      actorName: args.actor.name,
+      actorRole: args.actor.role,
+      tabId: args.tabId,
+      action: 'notification-sent',
+      target: args.caseId,
+      summary: `确认发出 ${changed} 条客户通知（改约/改派）。`,
+      caseId: args.caseId,
+      rev: next.rev,
+    },
+  ]);
+  const tx = db.transaction(['cases', 'history', 'audit'], 'readwrite');
+  await tx.objectStore('cases').put(next);
+  await tx.objectStore('history').put({
+    hid: `${next.id}@${next.rev}`,
+    caseId: next.id,
+    rev: next.rev,
+    at: now,
+    actorName: args.actor.name,
+    snapshot: structuredClone(next),
+  } satisfies HistoryRecord);
+  for (const e of entries) await tx.objectStore('audit').put(e);
+  await tx.done;
+
+  emit({ type: 'remote-changed', caseId: next.id, rev: next.rev, at: now, actorName: args.actor.name });
+  emit({ type: 'audit-added' });
+  return { ok: true };
 }
 
 export async function resetRemote(): Promise<void> {

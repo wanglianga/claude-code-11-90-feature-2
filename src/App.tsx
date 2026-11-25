@@ -10,6 +10,7 @@ import ConflictPage from './pages/ConflictPage';
 import SupervisorPage from './pages/SupervisorPage';
 import AuditPage from './pages/AuditPage';
 import ScenarioPage from './pages/ScenarioPage';
+import DispatchPage from './pages/DispatchPage';
 
 export function AppProviders() {
   return (
@@ -118,6 +119,12 @@ function Layout() {
             {queueCount > 0 && <span className="nav-count">{queueCount}</span>}
           </NavLink>
           <NavLink
+            to="/dispatch"
+            className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
+          >
+            上门日程编排
+          </NavLink>
+          <NavLink
             to="/scenarios"
             className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
           >
@@ -140,6 +147,7 @@ function Layout() {
             <Route path="/case/:caseId" element={<CasePage />} />
             <Route path="/case/:caseId/conflict" element={<ConflictPage />} />
             <Route path="/supervisor" element={<SupervisorPage />} />
+            <Route path="/dispatch" element={<DispatchPage />} />
             <Route path="/audit" element={<AuditPage />} />
             <Route path="/scenarios" element={<ScenarioPage />} />
             <Route path="*" element={<VisitListPage />} />

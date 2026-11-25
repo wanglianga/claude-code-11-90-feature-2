@@ -40,14 +40,75 @@ export interface ClientInfo {
 
 export type AppointmentStatus = 'scheduled' | 'canceled' | 'fulfilled';
 
+/**
+ * 上门访问的排程约束（仅“可调度”的上门预约携带；其它预约不必填）。
+ * 这里只放调度所需的“最小信息”：时间窗、资质、固定社工偏好/改派同意、服务地点节点。
+ */
+export interface AppointmentSchedule {
+  /** 所在服务日期（YYYY-MM-DD，与列出的家访窗口同日） */
+  serviceDate: string;
+  /** 可接受到访时间窗（分钟，自当日 00:00 起算，按社区所在时区） */
+  windowStart: number;
+  windowEnd: number;
+  /** 所需资质（如“助餐评估”） */
+  requiredSkills: string[];
+  /** 客户希望的固定社工 id；null 表示无固定偏好 */
+  preferredWorkerId: string | null;
+  /** 客户是否明确同意改派给其他合格社工（同意时主管才可以换人） */
+  reassignConsent: boolean;
+  /** 是否已与客户确认本次时间/人员（已确认的访问默认保留，可调整的只有未确认的弹性访问） */
+  confirmed: boolean;
+  /** 固定访问：时刻不可移动（例如固定复诊接送），排程只能满足或如实报不可行 */
+  fixed: boolean;
+  /** 服务对象的出发/到达节点（路网节点 id），调度只使用地点，不读取个案内容 */
+  locationNode: string;
+  /** 调度板上的代号（不含姓名等个案内容） */
+  publicLabel: string;
+  /** 最小服务说明：只够工作人员知道要做什么，不带个案背景 */
+  task: string;
+}
+
 export interface Appointment {
   id: string;
-  label: '今日家访' | '未来预约' | '过往记录';
+  label: '今日家访' | '未来预约' | '过往记录' | '固定接送';
   startAt: string; // ISO 字符串
   durationMin: number;
   place: string;
   status: AppointmentStatus;
   cancelReason?: string;
+  /** 当前责任社工（账号 id）；改派后排程器会更新该值 */
+  workerId?: string;
+  /** 调度约束；缺省表示该预约不进入跨个案上门日程编排 */
+  schedule?: AppointmentSchedule;
+}
+
+// ---------- 家庭准备事项 / 通知（排程改动时须同步更新） ----------
+
+export type FamilyPrepKind = 'prep' | 'key';
+
+export interface FamilyPrepItem {
+  id: string;
+  appointmentId: string;
+  kind: FamilyPrepKind;
+  text: string;
+  /** 家庭需在到访前完成的准备截止时刻（ISO）；改约后须随之移动 */
+  dueAt: string;
+  /** 相对到访时刻提前多少分钟完成（改约时据此重算 dueAt，而不是沿用旧日期） */
+  leadMinutes: number;
+  done: boolean;
+}
+
+export type NotificationKind = 'reschedule' | 'reassign' | 'combined' | 'confirmed' | 'kept';
+
+export interface CaseNotification {
+  id: string;
+  appointmentId: string;
+  kind: NotificationKind;
+  /** intended=待发出；sent=已通知 */
+  status: 'intended' | 'sent';
+  text: string;
+  createdAt: number;
+  sentAt?: number;
 }
 
 // ---------- 服务目标 / 服务计划 ----------
@@ -140,6 +201,10 @@ export interface CaseFile {
   referrals: Referral[];
   reminders: Reminder[];
   plan: PlanEntry[];
+  /** 家庭准备事项（改约后 dueAt/文案随之更新） */
+  familyPreps: FamilyPrepItem[];
+  /** 改约/改派产生的客户通知（intended 待发出，sent 已通知） */
+  notifications: CaseNotification[];
 }
 
 // ---------- 字段授权凭据（绑定明确到期时刻） ----------

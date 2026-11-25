@@ -7,6 +7,7 @@ import CaseOverviewTab from '../components/case/OverviewTab';
 import VisitTab from '../components/case/VisitTab';
 import GoalsTab from '../components/case/GoalsTab';
 import AppointmentsTab from '../components/case/AppointmentsTab';
+import PrepNoticeTab from '../components/case/PrepNoticeTab';
 import ReferralsTab from '../components/case/ReferralsTab';
 import SyncTab from '../components/case/SyncTab';
 import type { Violation } from '../types';
@@ -16,6 +17,7 @@ const TABS = [
   { key: 'visit', label: '到访登记' },
   { key: 'goals', label: '目标与计划' },
   { key: 'appts', label: '预约管理' },
+  { key: 'prep', label: '准备与通知' },
   { key: 'refs', label: '转介与提醒' },
   { key: 'sync', label: '同步记录' },
 ] as const;
@@ -193,6 +195,7 @@ export default function CasePage() {
         {tab === 'visit' && <VisitTab caseId={caseId} value={value} />}
         {tab === 'goals' && <GoalsTab caseId={caseId} value={value} />}
         {tab === 'appts' && <AppointmentsTab caseId={caseId} value={value} />}
+        {tab === 'prep' && <PrepNoticeTab caseId={caseId} value={value} />}
         {tab === 'refs' && <ReferralsTab caseId={caseId} value={value} />}
         {tab === 'sync' && <SyncTab caseId={caseId} />}
       </div>

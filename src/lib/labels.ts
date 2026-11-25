@@ -15,6 +15,7 @@ const FIELD_LABELS: Record<string, string> = {
   // appointment
   label: '预约类别',
   startAt: '时间',
+  workerId: '责任社工',
   durationMin: '时长（分钟）',
   place: '地点',
   status: '状态',
@@ -41,19 +42,33 @@ const FIELD_LABELS: Record<string, string> = {
   supervisorNote: '主管意见',
   materialFlag: '材料核验状态',
   bundledAppointmentId: '捆绑的未来预约',
-  serviceDate: '服务日期',
   appointmentId: '关联预约',
   goalId: '关联目标',
+  publicLabel: '调度代号',
+  task: '最小服务说明',
+  locationNode: '路网节点',
+  requiredSkills: '所需资质',
+  preferredWorkerId: '固定社工偏好',
+  reassignConsent: '是否同意改派',
+  confirmed: '是否已确认',
+  fixed: '是否固定访问',
+  windowStart: '时间窗开始',
+  windowEnd: '时间窗截止',
+  serviceDate: '服务日期',
   // referral
   org: '机构',
   service: '服务事项',
   reason: '转介原因',
   receiptNo: '回执编号',
   receiptAt: '回执时间',
-  // reminder
+  // reminder / family prep
   text: '内容',
   dueAt: '到期时间',
   done: '是否完成',
+  kind: '类型',
+  leadMinutes: '提前分钟数',
+  createdAt: '生成时间',
+  sentAt: '发出时间',
   // plan
   goalId_plan: '目标',
   ownerName: '责任人',
@@ -71,6 +86,8 @@ const COLLECTION_LABELS: Record<string, string> = {
   referrals: '转介',
   reminders: '提醒',
   plan: '服务计划',
+  familyPreps: '家庭准备事项',
+  notifications: '客户通知',
 };
 
 export function pathLabel(path: string): string {
@@ -120,6 +137,12 @@ const ENUM_LABELS: Record<string, string> = {
   incomplete: '未能完成',
   none: '正常',
   pending_verification: '待核材料',
+  intended: '待发出',
+  sent: '已发出',
+  reschedule: '改约通知',
+  reassign: '改派通知',
+  combined: '改约并改派',
+  kept: '保持原安排',
 };
 
 const DATE_FIELDS = new Set([

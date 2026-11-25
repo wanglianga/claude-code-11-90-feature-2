@@ -68,6 +68,31 @@ describe('全部页面渲染冒烟', () => {
     await waitFor(() => expect(document.querySelector('.secret-box .masked')).toBeTruthy());
   }, 40000);
 
+  it('上门日程编排：两种方案与派工单可渲染，应用需主管身份', async () => {
+    await ensureSeeded(true);
+    render(<AppProviders />);
+    fireEvent.click(await screen.findByRole('button', { name: '进入工作台' }));
+    await waitFor(() => expect(screen.getAllByText(/陈桂兰/).length).toBeGreaterThan(0), { timeout: 6000 });
+
+    fireEvent.click(screen.getByRole('link', { name: /上门日程编排/ }));
+    expect(await screen.findByRole('heading', { name: /跨个案上门日程编排/ })).toBeTruthy();
+    // 两种方案的卡片
+    expect(await screen.findByText('方案一 · 保持人员')).toBeTruthy();
+    expect(screen.getByText('方案二 · 同意范围内改派')).toBeTruthy();
+    // 默认社工身份：应用按钮禁用
+    const applyBtn = screen.getByRole('button', { name: /应用「保持人员」方案/ }) as HTMLButtonElement;
+    expect(applyBtn.disabled).toBe(true);
+    // 逐人时间线与派工单都存在
+    expect(document.querySelector('.timeline-grid')).toBeTruthy();
+    expect(document.querySelector('.dispatch-sheet')).toBeTruthy();
+    // 代号出现，且个案内容不在调度投影表格中泄漏常见隐私字段
+    expect(screen.getAllByText(/西区·安（A）/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/清河里 3 号楼 2 单元 102/)).toBeNull();
+    // 切到改派方案
+    fireEvent.click(screen.getByRole('tab', { name: /在客户同意范围内改派/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /应用「同意范围内改派」方案/ })).toBeTruthy());
+  }, 30000);
+
   it('样例页提供一键布置与双标签入口', async () => {
     await ensureSeeded(true);
     render(<AppProviders />);
